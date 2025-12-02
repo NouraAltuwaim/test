@@ -8,8 +8,7 @@
         playsinline
         class="video remote"
       ></video>
-
-      <!-- Local video (اختياري) -->
+ 
       <video
         ref="localVideo"
         autoplay
@@ -33,7 +32,7 @@
 
 <script setup>
 import { onMounted, onBeforeUnmount, ref } from 'vue'
-import { Room, RoomEvent, Track } from 'livekit-client'
+import { Room, RoomEvent, Track , createLocalVideoTrack,createLocalAudioTrack} from 'livekit-client'
 
 const room = ref(null)
 const connected = ref(false)
@@ -89,12 +88,23 @@ async function handleStartCall(payload) {
     })
 
     // Remote track subscribed
-    newRoom.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
-      console.log('[Vue] TrackSubscribed:', track.kind, 'from', participant.identity)
-      if (track.kind === Track.Kind.Video && remoteVideo.value) {
-        attachVideoTrack(track, remoteVideo.value)
-      }
-    })
+   newRoom.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
+  console.log(
+    '[Vue] Subscribed:',
+    track.kind,
+    'from',
+    participant.identity
+  )
+
+  if (track.kind === Track.Kind.Audio) {
+    track.attach()
+  }
+
+  if (track.kind === Track.Kind.Video && remoteVideo.value) {
+    track.attach(remoteVideo.value)
+  }
+})
+
 
     // Optional: local track published → attach to local video
     newRoom.on(RoomEvent.LocalTrackPublished, (publication, participant) => {
@@ -119,11 +129,41 @@ async function handleStartCall(payload) {
     room.value = newRoom
 
     // Enable mic and camera
-    await newRoom.localParticipant.setMicrophoneEnabled(true)
-    isMuted.value = false
+   try {
+  const micTrack = await createLocalAudioTrack()
 
-    await newRoom.localParticipant.setCameraEnabled(!!video)
-    cameraOff.value = !video
+  await newRoom.localParticipant.publishTrack(micTrack)
+  isMuted.value = false
+
+  console.log('✅ Audio track published')
+} catch (e) {
+  console.error('❌ Failed to create/publish audio track', e)
+}
+
+
+    if (video) {
+  try {
+    const camTrack = await createLocalVideoTrack({
+      resolution: { width: 1280, height: 720 },
+      frameRate: 30
+    })
+
+    await newRoom.localParticipant.publishTrack(camTrack)
+    cameraOff.value = false
+
+    if (localVideo.value) {
+      camTrack.attach(localVideo.value)
+    }
+
+    console.log('✅ Video track published')
+  } catch (e) {
+    console.error('❌ Failed to create/publish video track', e)
+    cameraOff.value = true
+  }
+} else {
+  cameraOff.value = true
+}
+
 
     // Notify Java
     window.javaBridge.sendToJava('callConnected', {
@@ -145,14 +185,27 @@ async function handleStartCall(payload) {
  */
 async function handleToggleMute(payload) {
   if (!room.value) return
+
   const mute = !!payload?.mute
+
   try {
-    await room.value.localParticipant.setMicrophoneEnabled(!mute)
+    const audioPub =
+      room.value.localParticipant.audioTrackPublications.values().next().value
+
+    if (!audioPub?.track) return
+
+    if (mute) {
+      await audioPub.track.mute()
+    } else {
+      await audioPub.track.unmute()
+    }
+
     isMuted.value = mute
   } catch (e) {
     console.error('[Vue] Failed to toggle mute:', e)
   }
 }
+
 
 /**
  * Java → Vue : toggle camera
@@ -161,8 +214,15 @@ async function handleToggleMute(payload) {
 async function handleToggleCamera(payload) {
   if (!room.value) return
   const off = !!payload?.off
-  try {
-    await room.value.localParticipant.setCameraEnabled(!off)
+  try {const videoPub = room.value.localParticipant.videoTrackPublications.values().next().value
+
+if (off) {
+  await videoPub?.track?.mute()
+} else {
+  await videoPub?.track?.unmute()
+}
+cameraOff.value = off
+
     cameraOff.value = off
   } catch (e) {
     console.error('[Vue] Failed to toggle camera:', e)
@@ -184,8 +244,19 @@ async function handleEndCall() {
     console.error('[Vue] Failed to end call:', e)
   }
 }
-onMounted(() => {
+onMounted(async () => {
   console.log('[Vue] LiveKitRoom mounted')
+   try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: true
+    })
+    console.log('✅ Camera & Mic granted by browser', stream)
+
+    stream.getTracks().forEach(t => t.stop())
+  } catch (err) {
+    console.error('❌ Camera/Mic permission denied', err)
+  }
 
   function registerBridgeListeners(attempt = 1) {
     if (!window.javaBridge || typeof window.javaBridge.on !== 'function') {
@@ -239,6 +310,10 @@ onBeforeUnmount(async () => {
   align-items: center;
   justify-content: center;
   background: #000;
+}
+video {
+  width: 100%;
+  height: 100%;
 }
 
 .video {
