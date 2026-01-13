@@ -8,7 +8,7 @@
         playsinline
         class="video remote"
       ></video>
- 
+
       <video
         ref="localVideo"
         autoplay
@@ -19,20 +19,20 @@
     </div>
 
     <!-- Debug overlay -->
-    <div class="overlay">
+    <!-- <div class="overlay">
       <div class="status">
         <div>Connection: <strong>{{ connected ? 'Connected' : 'Disconnected' }}</strong></div>
         <div>Muted: <strong>{{ isMuted ? 'Yes' : 'No' }}</strong></div>
         <div>Camera off: <strong>{{ cameraOff ? 'Yes' : 'No' }}</strong></div>
         <div>Room: <strong>{{ roomName || '-' }}</strong></div>
       </div>
-    </div>
+    </div> -->
   </div>
 </template>
 
 <script setup>
 import { onMounted, onBeforeUnmount, ref } from 'vue'
-import { Room, RoomEvent, Track , createLocalVideoTrack,createLocalAudioTrack} from 'livekit-client'
+import { Room, RoomEvent, Track, createLocalVideoTrack, createLocalAudioTrack } from 'livekit-client'
 
 const room = ref(null)
 const connected = ref(false)
@@ -55,7 +55,6 @@ function attachVideoTrack(track, videoEl) {
 function detachAllTracks(videoEl) {
   if (!videoEl) return
   try {
-    // LiveKit tracks add themselves as sources; detach all
     videoEl.srcObject = null
   } catch (e) {
     console.error('Failed to detach tracks:', e)
@@ -87,24 +86,37 @@ async function handleStartCall(payload) {
       dynacast: true
     })
 
+    // ✅ If the other user leaves, close the remaining user's Swing window
+    newRoom.on(RoomEvent.ParticipantDisconnected, (participant) => {
+      console.log('[Vue] ParticipantDisconnected:', participant?.identity)
+
+      // Notify Java (Swing) to close the call window on this side
+      window.javaBridge?.sendToJava?.('REMOTE_LEFT', {
+        identity: participant?.identity || '',
+        roomName: roomName.value || ''
+      })
+
+      // Optional: detach remote view
+      detachAllTracks(remoteVideo.value)
+    })
+
+    // Optional: helpful log
+    newRoom.on(RoomEvent.ParticipantConnected, (participant) => {
+      console.log('[Vue] ParticipantConnected:', participant?.identity)
+    })
+
     // Remote track subscribed
-   newRoom.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
-  console.log(
-    '[Vue] Subscribed:',
-    track.kind,
-    'from',
-    participant.identity
-  )
+    newRoom.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
+      console.log('[Vue] Subscribed:', track.kind, 'from', participant.identity)
 
-  if (track.kind === Track.Kind.Audio) {
-    track.attach()
-  }
+      if (track.kind === Track.Kind.Audio) {
+        track.attach()
+      }
 
-  if (track.kind === Track.Kind.Video && remoteVideo.value) {
-    track.attach(remoteVideo.value)
-  }
-})
-
+      if (track.kind === Track.Kind.Video && remoteVideo.value) {
+        track.attach(remoteVideo.value)
+      }
+    })
 
     // Optional: local track published → attach to local video
     newRoom.on(RoomEvent.LocalTrackPublished, (publication, participant) => {
@@ -118,7 +130,12 @@ async function handleStartCall(payload) {
     newRoom.on(RoomEvent.Disconnected, () => {
       console.log('[Vue] Room disconnected')
       connected.value = false
-      window.javaBridge.sendToJava('callDisconnected', {})
+
+      //  Tell Java to close the Swing window (covers network drops too)
+      window.javaBridge?.sendToJava?.('ROOM_DISCONNECTED', {
+        roomName: roomName.value || ''
+      })
+
       detachAllTracks(remoteVideo.value)
       detachAllTracks(localVideo.value)
     })
@@ -128,52 +145,49 @@ async function handleStartCall(payload) {
     connected.value = true
     room.value = newRoom
 
-    // Enable mic and camera
-   try {
-  const micTrack = await createLocalAudioTrack()
-
-  await newRoom.localParticipant.publishTrack(micTrack)
-  isMuted.value = false
-
-  console.log('✅ Audio track published')
-} catch (e) {
-  console.error('❌ Failed to create/publish audio track', e)
-}
-
-
-    if (video) {
-  try {
-    const camTrack = await createLocalVideoTrack({
-      resolution: { width: 1280, height: 720 },
-      frameRate: 30
-    })
-
-    await newRoom.localParticipant.publishTrack(camTrack)
-    cameraOff.value = false
-
-    if (localVideo.value) {
-      camTrack.attach(localVideo.value)
+    // Enable mic
+    try {
+      const micTrack = await createLocalAudioTrack()
+      await newRoom.localParticipant.publishTrack(micTrack)
+      isMuted.value = false
+      console.log('✅ Audio track published')
+    } catch (e) {
+      console.error('❌ Failed to create/publish audio track', e)
     }
 
-    console.log('✅ Video track published')
-  } catch (e) {
-    console.error('❌ Failed to create/publish video track', e)
-    cameraOff.value = true
-  }
-} else {
-  cameraOff.value = true
-}
+    // Enable camera if video call
+    if (video) {
+      try {
+        const camTrack = await createLocalVideoTrack({
+          resolution: { width: 1280, height: 720 },
+          frameRate: 30
+        })
 
+        await newRoom.localParticipant.publishTrack(camTrack)
+        cameraOff.value = false
+
+        if (localVideo.value) {
+          camTrack.attach(localVideo.value)
+        }
+
+        console.log('✅ Video track published')
+      } catch (e) {
+        console.error('❌ Failed to create/publish video track', e)
+        cameraOff.value = true
+      }
+    } else {
+      cameraOff.value = true
+    }
 
     // Notify Java
-    window.javaBridge.sendToJava('callConnected', {
+    window.javaBridge?.sendToJava?.('callConnected', {
       roomName: roomName.value
     })
 
   } catch (e) {
     console.error('[Vue] Failed to connect to LiveKit:', e)
     connected.value = false
-    window.javaBridge.sendToJava('callError', {
+    window.javaBridge?.sendToJava?.('callError', {
       message: e?.message || 'Unknown error'
     })
   }
@@ -206,7 +220,6 @@ async function handleToggleMute(payload) {
   }
 }
 
-
 /**
  * Java → Vue : toggle camera
  * payload = { off: true/false }
@@ -214,14 +227,16 @@ async function handleToggleMute(payload) {
 async function handleToggleCamera(payload) {
   if (!room.value) return
   const off = !!payload?.off
-  try {const videoPub = room.value.localParticipant.videoTrackPublications.values().next().value
 
-if (off) {
-  await videoPub?.track?.mute()
-} else {
-  await videoPub?.track?.unmute()
-}
-cameraOff.value = off
+  try {
+    const videoPub =
+      room.value.localParticipant.videoTrackPublications.values().next().value
+
+    if (off) {
+      await videoPub?.track?.mute()
+    } else {
+      await videoPub?.track?.unmute()
+    }
 
     cameraOff.value = off
   } catch (e) {
@@ -244,15 +259,16 @@ async function handleEndCall() {
     console.error('[Vue] Failed to end call:', e)
   }
 }
+
 onMounted(async () => {
   console.log('[Vue] LiveKitRoom mounted')
-   try {
+
+  try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: true,
       audio: true
     })
     console.log('✅ Camera & Mic granted by browser', stream)
-
     stream.getTracks().forEach(t => t.stop())
   } catch (err) {
     console.error('❌ Camera/Mic permission denied', err)
@@ -274,14 +290,13 @@ onMounted(async () => {
     window.javaBridge.on('toggleCamera', handleToggleCamera)
     window.javaBridge.on('endCall', handleEndCall)
 
-     if (typeof window.javaBridge.sendToJava === 'function') {
+    if (typeof window.javaBridge.sendToJava === 'function') {
       window.javaBridge.sendToJava('vueReady', {})
     }
   }
 
   registerBridgeListeners()
 })
-
 
 onBeforeUnmount(async () => {
   if (room.value) {
