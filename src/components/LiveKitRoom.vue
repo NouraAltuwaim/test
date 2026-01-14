@@ -1,57 +1,61 @@
 <template>
   <div class="room-root">
-    <div class="videos">
-      <!-- Remote video -->
-      <video
-        ref="remoteVideo"
-        autoplay
-        playsinline
-        class="video remote"
-      ></video>
-
-      <video
-        ref="localVideo"
-        autoplay
-        playsinline
-        muted
-        class="video local"
-      ></video>
-    </div>
-
-    <!-- Debug overlay -->
-    <!-- <div class="overlay">
-      <div class="status">
-        <div>Connection: <strong>{{ connected ? 'Connected' : 'Disconnected' }}</strong></div>
-        <div>Muted: <strong>{{ isMuted ? 'Yes' : 'No' }}</strong></div>
-        <div>Camera off: <strong>{{ cameraOff ? 'Yes' : 'No' }}</strong></div>
-        <div>Room: <strong>{{ roomName || '-' }}</strong></div>
+    <!-- VIDEO CALL LAYOUT -->
+    <div v-if="isVideoCall" class="videos">
+      <video ref="remoteVideo" autoplay playsinline class="video remote"></video>
+      <video ref="localVideo" autoplay playsinline muted class="video local"></video>
+ 
+      <div v-if="remoteName" class="remote-label">
+        {{ remoteName }}
       </div>
-    </div> -->
+    </div>
+ 
+    <!-- VOICE CALL LAYOUT -->
+    <div v-else class="voice-layout" :class="{ pip: isPip }">
+  <div class="voice-center">
+    <img
+      src="../assets/call1.png"
+      alt="Call avatar"
+      class="voice-avatar"
+    />
+ 
+    <div v-if="remoteName" class="voice-name">
+      {{ remoteName }}
+    </div>
+  </div>
+</div>
+ 
   </div>
 </template>
-
+ 
 <script setup>
 import { onMounted, onBeforeUnmount, ref } from 'vue'
 import { Room, RoomEvent, Track, createLocalVideoTrack, createLocalAudioTrack } from 'livekit-client'
-
+ 
 const room = ref(null)
 const connected = ref(false)
 const isMuted = ref(false)
 const cameraOff = ref(false)
 const roomName = ref('')
-
+ 
 const remoteVideo = ref(null)
 const localVideo = ref(null)
-
-function attachVideoTrack(track, videoEl) {
-  if (!videoEl || !track) return
-  try {
-    track.attach(videoEl)
-  } catch (e) {
-    console.error('Failed to attach track:', e)
-  }
+ 
+const isVideoCall = ref(false)
+const remoteName = ref('')
+ 
+const isPip = ref(false)
+ 
+function updatePipState() {
+  const w = window.innerWidth
+  const h = window.innerHeight
+ 
+  isPip.value = w < 400 || h < 300
 }
-
+ 
+window.addEventListener('resize', updatePipState)
+ 
+ 
 function detachAllTracks(videoEl) {
   if (!videoEl) return
   try {
@@ -60,17 +64,45 @@ function detachAllTracks(videoEl) {
     console.error('Failed to detach tracks:', e)
   }
 }
-
+ 
+function updateRemoteNameFromParticipant(participant) {
+  if (!participant) return
+ 
+  // Only show real display names, never IDs
+  const name = participant.name
+ 
+  if (name && name.trim().length > 0) {
+    remoteName.value = name.trim()
+  } else {
+    remoteName.value = ''
+  }
+}
+ 
+ 
 /**
- * Java → Vue : called when Java sends a "startCall" command
- * payload = { wsUrl, token, roomName, video }
+ * Force layout recalculation in JCEF when Swing resizes.
+ * Works well for PiP toggle/maximize.
  */
+function forceReflow() {
+  try {
+    const el = document.documentElement
+    el.style.display = 'none'
+    // eslint-disable-next-line no-unused-expressions
+    el.offsetHeight
+    el.style.display = ''
+  } catch (e) {
+    // ignore
+  }
+}
+ 
 async function handleStartCall(payload) {
   console.log('[Vue] handleStartCall payload:', payload)
   const { wsUrl, token, roomName: rn, video } = payload || {}
+ 
   roomName.value = rn || ''
-
-  // Disconnect previous room if exists
+  isVideoCall.value = !!video
+  remoteName.value = ''
+ 
   if (room.value) {
     try {
       await room.value.disconnect()
@@ -79,98 +111,91 @@ async function handleStartCall(payload) {
     }
     room.value = null
   }
-
+ 
   try {
     const newRoom = new Room({
       adaptiveStream: true,
       dynacast: true
     })
-
-    // ✅ If the other user leaves, close the remaining user's Swing window
+ 
     newRoom.on(RoomEvent.ParticipantDisconnected, (participant) => {
       console.log('[Vue] ParticipantDisconnected:', participant?.identity)
-
-      // Notify Java (Swing) to close the call window on this side
+ 
       window.javaBridge?.sendToJava?.('REMOTE_LEFT', {
         identity: participant?.identity || '',
         roomName: roomName.value || ''
       })
-
-      // Optional: detach remote view
+ 
       detachAllTracks(remoteVideo.value)
     })
-
-    // Optional: helpful log
+ 
     newRoom.on(RoomEvent.ParticipantConnected, (participant) => {
       console.log('[Vue] ParticipantConnected:', participant?.identity)
+      updateRemoteNameFromParticipant(participant)
     })
-
-    // Remote track subscribed
+ 
     newRoom.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
       console.log('[Vue] Subscribed:', track.kind, 'from', participant.identity)
-
+ 
+      updateRemoteNameFromParticipant(participant)
+ 
       if (track.kind === Track.Kind.Audio) {
         track.attach()
       }
-
+ 
       if (track.kind === Track.Kind.Video && remoteVideo.value) {
         track.attach(remoteVideo.value)
+        forceReflow()
       }
     })
-
-    // Optional: local track published → attach to local video
-    newRoom.on(RoomEvent.LocalTrackPublished, (publication, participant) => {
-      console.log('[Vue] LocalTrackPublished:', publication.kind)
+ 
+    newRoom.on(RoomEvent.LocalTrackPublished, (publication) => {
       if (publication.kind === Track.Kind.Video && localVideo.value) {
         const track = publication.track
-        if (track) attachVideoTrack(track, localVideo.value)
+        if (track) track.attach(localVideo.value)
+        forceReflow()
       }
     })
-
+ 
     newRoom.on(RoomEvent.Disconnected, () => {
       console.log('[Vue] Room disconnected')
       connected.value = false
-
-      //  Tell Java to close the Swing window (covers network drops too)
+ 
       window.javaBridge?.sendToJava?.('ROOM_DISCONNECTED', {
         roomName: roomName.value || ''
       })
-
+ 
       detachAllTracks(remoteVideo.value)
       detachAllTracks(localVideo.value)
     })
-
+ 
     console.log('[Vue] Connecting to LiveKit:', wsUrl)
     await newRoom.connect(wsUrl, token)
+ 
     connected.value = true
     room.value = newRoom
-
-    // Enable mic
+ 
+    // publish mic
     try {
       const micTrack = await createLocalAudioTrack()
       await newRoom.localParticipant.publishTrack(micTrack)
       isMuted.value = false
-      console.log('✅ Audio track published')
     } catch (e) {
       console.error('❌ Failed to create/publish audio track', e)
     }
-
-    // Enable camera if video call
+ 
+    // publish camera only for video calls
     if (video) {
       try {
         const camTrack = await createLocalVideoTrack({
           resolution: { width: 1280, height: 720 },
           frameRate: 30
         })
-
+ 
         await newRoom.localParticipant.publishTrack(camTrack)
         cameraOff.value = false
-
-        if (localVideo.value) {
-          camTrack.attach(localVideo.value)
-        }
-
-        console.log('✅ Video track published')
+ 
+        if (localVideo.value) camTrack.attach(localVideo.value)
       } catch (e) {
         console.error('❌ Failed to create/publish video track', e)
         cameraOff.value = true
@@ -178,12 +203,12 @@ async function handleStartCall(payload) {
     } else {
       cameraOff.value = true
     }
-
-    // Notify Java
+ 
     window.javaBridge?.sendToJava?.('callConnected', {
       roomName: roomName.value
     })
-
+ 
+    forceReflow()
   } catch (e) {
     console.error('[Vue] Failed to connect to LiveKit:', e)
     connected.value = false
@@ -192,61 +217,44 @@ async function handleStartCall(payload) {
     })
   }
 }
-
-/**
- * Java → Vue : toggle mute
- * payload = { mute: true/false }
- */
+ 
 async function handleToggleMute(payload) {
   if (!room.value) return
-
   const mute = !!payload?.mute
-
+ 
   try {
     const audioPub =
       room.value.localParticipant.audioTrackPublications.values().next().value
-
+ 
     if (!audioPub?.track) return
-
-    if (mute) {
-      await audioPub.track.mute()
-    } else {
-      await audioPub.track.unmute()
-    }
-
+ 
+    if (mute) await audioPub.track.mute()
+    else await audioPub.track.unmute()
+ 
     isMuted.value = mute
   } catch (e) {
     console.error('[Vue] Failed to toggle mute:', e)
   }
 }
-
-/**
- * Java → Vue : toggle camera
- * payload = { off: true/false }
- */
+ 
 async function handleToggleCamera(payload) {
   if (!room.value) return
   const off = !!payload?.off
-
+ 
   try {
     const videoPub =
       room.value.localParticipant.videoTrackPublications.values().next().value
-
-    if (off) {
-      await videoPub?.track?.mute()
-    } else {
-      await videoPub?.track?.unmute()
-    }
-
+ 
+    if (off) await videoPub?.track?.mute()
+    else await videoPub?.track?.unmute()
+ 
     cameraOff.value = off
+    forceReflow()
   } catch (e) {
     console.error('[Vue] Failed to toggle camera:', e)
   }
 }
-
-/**
- * Java → Vue : end call
- */
+ 
 async function handleEndCall() {
   if (!room.value) return
   try {
@@ -259,46 +267,36 @@ async function handleEndCall() {
     console.error('[Vue] Failed to end call:', e)
   }
 }
-
+ 
+function handleResize() {
+  forceReflow()
+}
+ 
 onMounted(async () => {
-  console.log('[Vue] LiveKitRoom mounted')
-
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: true,
-      audio: true
-    })
-    console.log('✅ Camera & Mic granted by browser', stream)
-    stream.getTracks().forEach(t => t.stop())
-  } catch (err) {
-    console.error('❌ Camera/Mic permission denied', err)
-  }
-
+  window.addEventListener('resize', handleResize)
+ 
   function registerBridgeListeners(attempt = 1) {
     if (!window.javaBridge || typeof window.javaBridge.on !== 'function') {
-      console.warn('[Vue] javaBridge not ready yet, retrying...', attempt)
-      if (attempt < 30) {
-        setTimeout(() => registerBridgeListeners(attempt + 1), 200)
-      }
+      if (attempt < 30) setTimeout(() => registerBridgeListeners(attempt + 1), 200)
       return
     }
-
-    console.log('[Vue] javaBridge ready, registering listeners', attempt)
-
+ 
     window.javaBridge.on('startCall', handleStartCall)
     window.javaBridge.on('toggleMute', handleToggleMute)
     window.javaBridge.on('toggleCamera', handleToggleCamera)
     window.javaBridge.on('endCall', handleEndCall)
-
-    if (typeof window.javaBridge.sendToJava === 'function') {
-      window.javaBridge.sendToJava('vueReady', {})
-    }
+ 
+    window.javaBridge.sendToJava?.('vueReady', {})
+    updatePipState()
+ 
   }
-
+ 
   registerBridgeListeners()
 })
-
+ 
 onBeforeUnmount(async () => {
+  window.removeEventListener('resize', handleResize)
+ 
   if (room.value) {
     try {
       await room.value.disconnect()
@@ -308,7 +306,7 @@ onBeforeUnmount(async () => {
   }
 })
 </script>
-
+ 
 <style scoped>
 .room-root {
   position: relative;
@@ -317,57 +315,105 @@ onBeforeUnmount(async () => {
   background: #000;
   overflow: hidden;
 }
-
+ 
+/* ================= VIDEO ================= */
+ 
 .videos {
   position: absolute;
   inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   background: #000;
 }
-video {
-  width: 100%;
-  height: 100%;
-}
-
-.video {
-  background: #000;
-  object-fit: cover;
-}
-
+ 
+/* remote fills container and stays inside (PiP safe) */
 .remote {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
+  background: #000;
+  object-fit: contain; /* KEY for PiP */
 }
-
+ 
+/* local preview scales down in PiP */
 .local {
   position: absolute;
-  width: 220px;
-  height: 140px;
-  bottom: 16px;
-  right: 16px;
+  right: 12px;
+  bottom: 12px;
+ 
+  width: min(30vw, 220px);
+  aspect-ratio: 16 / 9;
+  height: auto;
+ 
   border-radius: 8px;
   border: 2px solid rgba(255, 255, 255, 0.3);
   box-shadow: 0 0 12px rgba(0, 0, 0, 0.7);
+  object-fit: cover;
 }
-
-.overlay {
+ 
+/* Remote name overlay */
+.remote-label {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #f9fafb;
+  font-size: 14px;
+  letter-spacing: 0.02em;
+}
+ 
+/* ================= VOICE ================= */
+ 
+.voice-layout {
   position: absolute;
   inset: 0;
-  pointer-events: none;
+  background: radial-gradient(circle at top, #1e293b 0%, #020617 60%, #000 100%);
   display: flex;
-  align-items: flex-start;
-  justify-content: flex-start;
+  align-items: center;
+  justify-content: center;
 }
-
-.status {
-  margin: 12px;
-  padding: 8px 12px;
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.5);
-  color: #f1f5f9;
-  font-size: 12px;
-  line-height: 1.4;
+ 
+.voice-center {
+  text-align: center;
+  color: #e5e7eb;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+ 
+/* ===== DEFAULT (MAXIMIZED) ===== */
+ 
+.voice-avatar {
+  width: 180px;
+  height: 180px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #1f2937;
+  box-shadow:
+    0 0 0 12px rgba(255, 255, 255, 0.03),
+    0 0 40px rgba(0, 0, 0, 0.6);
+  margin-bottom: 18px;
+}
+ 
+.voice-name {
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+}
+ 
+/* ===== PiP MODE ===== */
+ 
+.voice-layout.pip .voice-avatar {
+  width: 96px;
+  height: 96px;
+  margin-bottom: 8px;
+  box-shadow:
+    0 0 0 6px rgba(255, 255, 255, 0.04);
+}
+ 
+.voice-layout.pip .voice-name {
+  font-size: 13px;
+  opacity: 0.85;
 }
 </style>
