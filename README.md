@@ -1,15 +1,1 @@
-TRUNCATE TABLE notification;
-ALTER TABLE notification 
-ADD COLUMN type VARCHAR(50),
-ADD COLUMN description TEXT;
-ALTER TABLE notification 
-MODIFY COLUMN type VARCHAR(50) NOT NULL;
-ALTER TABLE notification 
-DROP COLUMN notification_type,
-DROP COLUMN title,
-DROP COLUMN message,
-DROP COLUMN call_id,
-DROP COLUMN voice_message_id,
-DROP COLUMN sender_id,
-DROP COLUMN metadata,
-DROP COLUMN read_at;                                                                                                                                  UPDATE notification SET type = 'SYSTEM' WHERE type IS NULL; 
+
